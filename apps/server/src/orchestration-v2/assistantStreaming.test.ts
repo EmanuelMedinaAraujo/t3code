@@ -148,3 +148,43 @@ it("holds a streamed section heading until its content has a boundary", () => {
     rest: "Next",
   });
 });
+
+it("delivers the same boundaries when resuming a streaming scan as when rescanning", () => {
+  const fixture = [
+    "**Plan**\n",
+    "First paragraph runs on\nacross lines.\n\n",
+    "- one\n- two\n  1. nested\n",
+    "\t+ tab item \r\n3)\t \r\n12. ordered\n",
+    "# Heading\n",
+    "Body under heading.\n\n",
+    "  ```ts\n  const a = 1;\n\n  ```\n",
+    "~~~\nnot ``` a close\n~~~~\n",
+    "Tail without newline",
+  ].join("");
+  const filter = makeAssistantStreamingFilter("paragraph");
+  let delivered = "";
+  // Each update is past the 400ms window, so every prefix is scanned.
+  for (let end = 1; end <= fixture.length; end += 1) {
+    const text = fixture.slice(0, end);
+    const { ready } = splitBufferedAssistantText(text);
+    const result = filter(message(text), end * 1_000);
+    if (ready && ready !== delivered) {
+      expect(result).toMatchObject({ message: { text: ready } });
+      delivered = ready;
+    } else {
+      expect(result).toBeNull();
+    }
+  }
+  // A provider that replaces the text restarts the scan instead of resuming.
+  const replaced = "Rewritten\n\nanswer";
+  expect(filter(message(replaced), (fixture.length + 1) * 1_000)).toMatchObject({
+    message: { text: splitBufferedAssistantText(replaced).ready },
+  });
+});
+
+it("starts a list item on the partial line only once its marker is followed by content", () => {
+  expect(splitBufferedAssistantText("Intro\n- ").ready).toBe("");
+  expect(splitBufferedAssistantText("Intro\n\t3)\t \r").ready).toBe("");
+  expect(splitBufferedAssistantText("Intro\n- item").ready).toBe("Intro\n");
+  expect(splitBufferedAssistantText("Intro\n\t12. item \r").ready).toBe("Intro\n");
+});

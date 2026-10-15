@@ -12,6 +12,9 @@ const BLANK_LINE_PATTERN = /^[ \t]*$/;
 // nested items count. The trailing space is required, so a partial `-` or
 // `1.` never matches before the model finishes the marker.
 const LIST_ITEM_START_PATTERN = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/;
+// The same marker, matched in place at a line start: `y` anchors it at
+// `lastIndex`, and `m` lets `^` match there because a newline precedes it.
+const LIST_ITEM_START_AT_PATTERN = new RegExp(LIST_ITEM_START_PATTERN.source, "my");
 // A section title: an ATX heading, or a line of only bold text, which models
 // often use as a heading.
 const SECTION_TITLE_PATTERN = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|\*\*(?:[^*]|\*(?!\*))+\*\*:?$)/;
@@ -33,25 +36,73 @@ const TOP_LEVEL_HEADING_PATTERN = /^#{1,6}(?:[ \t]|$)/;
  * title never lands alone and waits above a block that is still streaming.
  */
 export function splitBufferedAssistantText(text: string): { ready: string; rest: string } {
-  let openFence: { marker: string; indent: number } | null = null;
-  let boundary = -1;
-  let lineStart = 0;
-  let titleAwaitingContent = false;
+  return splitAtBoundary(text, scanAssistantText(text, INITIAL_SCAN).boundary);
+}
+
+function splitAtBoundary(text: string, boundary: number): { ready: string; rest: string } {
+  if (boundary === -1) {
+    return { ready: "", rest: text };
+  }
+  return { ready: text.slice(0, boundary), rest: text.slice(boundary) };
+}
+
+/**
+ * `LIST_ITEM_START_PATTERN` against the unterminated line at `lineStart`, with
+ * trailing spaces, tabs and carriage returns trimmed as for complete lines.
+ */
+function partialLineStartsListItem(text: string, lineStart: number): boolean {
+  let end = text.length;
+  for (; end > lineStart; end -= 1) {
+    const code = text.charCodeAt(end - 1);
+    if (code !== 0x20 && code !== 0x09 && code !== 0x0d) break;
+  }
+  LIST_ITEM_START_AT_PATTERN.lastIndex = lineStart;
+  const match = LIST_ITEM_START_AT_PATTERN.exec(text);
+  // Trimming only removes a trailing run, so the trimmed line matches exactly
+  // when the in-place match ends inside it.
+  return match !== null && lineStart + match[0].length <= end;
+}
+
+/** Scanner state after every fully terminated line before `lineStart`. */
+interface AssistantTextScan {
+  readonly lineStart: number;
+  readonly openFence: { readonly marker: string; readonly indent: number } | null;
+  readonly boundary: number;
+  readonly titleAwaitingContent: boolean;
+}
+
+const INITIAL_SCAN: AssistantTextScan = {
+  lineStart: 0,
+  openFence: null,
+  boundary: -1,
+  titleAwaitingContent: false,
+};
+
+/**
+ * Scans `text` from `start`, which must describe a prefix of `text`. Returns
+ * the boundary, including the partial last line's list-item lookahead, and the
+ * state to resume from once more text is appended.
+ */
+function scanAssistantText(
+  text: string,
+  start: AssistantTextScan,
+): { boundary: number; resume: AssistantTextScan } {
+  let { openFence, boundary, lineStart, titleAwaitingContent } = start;
   for (;;) {
     const newline = text.indexOf("\n", lineStart);
-    const line = text
-      .slice(lineStart, newline === -1 ? text.length : newline)
-      .replace(/[ \t\r]+$/, "");
-    if (
-      openFence === null &&
-      lineStart > 0 &&
-      !titleAwaitingContent &&
-      LIST_ITEM_START_PATTERN.test(line)
-    ) {
-      boundary = lineStart;
-    }
+    const mayStartListItem = openFence === null && lineStart > 0 && !titleAwaitingContent;
     if (newline === -1) {
-      break;
+      // The partial last line is scanned again on every update, so check it
+      // without copying it: a long paragraph would otherwise cost its length.
+      return {
+        boundary:
+          mayStartListItem && partialLineStartsListItem(text, lineStart) ? lineStart : boundary,
+        resume: { lineStart, openFence, boundary, titleAwaitingContent },
+      };
+    }
+    const line = text.slice(lineStart, newline).replace(/[ \t\r]+$/, "");
+    if (mayStartListItem && LIST_ITEM_START_PATTERN.test(line)) {
+      boundary = lineStart;
     }
     const fenceMatch = MARKDOWN_FENCE_PATTERN.exec(line);
     if (fenceMatch) {
@@ -82,15 +133,31 @@ export function splitBufferedAssistantText(text: string): { ready: string; rest:
     }
     lineStart = newline + 1;
   }
-  if (boundary === -1) {
-    return { ready: "", rest: text };
-  }
-  return { ready: text.slice(0, boundary), rest: text.slice(boundary) };
+}
+
+/**
+ * `splitBufferedAssistantText` for text that usually grows by appends. Resumes
+ * from the last fully terminated line when the text still starts with it, so a
+ * streaming message is not rescanned from the top on every update.
+ */
+function makeIncrementalAssistantTextSplitter() {
+  let scanned = "";
+  let resume = INITIAL_SCAN;
+  return (text: string): { ready: string; rest: string } => {
+    // Slice equality, not startsWith: V8 compares flat strings in bulk, which
+    // keeps this check far cheaper than the scan it saves.
+    const extendsScanned = text.slice(0, scanned.length) === scanned;
+    const result = scanAssistantText(text, extendsScanned ? resume : INITIAL_SCAN);
+    resume = result.resume;
+    scanned = text.slice(0, resume.lineStart);
+    return splitAtBoundary(text, result.boundary);
+  };
 }
 
 /** Buffer assistant messages and reasoning alike, keeping unfinished markdown out of the read model. */
 export function makeAssistantStreamingFilter(mode: ResponseStreamingMode) {
   const delivered = new Map<string, { text: string; at: number }>();
+  const splitters = new Map<string, ReturnType<typeof makeIncrementalAssistantTextSplitter>>();
   return (
     event: ProviderAdapter.ProviderAdapterV2Event,
     now: number,
@@ -112,12 +179,18 @@ export function makeAssistantStreamingFilter(mode: ResponseStreamingMode) {
     const key = `${event.type}:${message.id}`;
     if (!message.streaming) {
       delivered.delete(key);
+      splitters.delete(key);
       return event;
     }
     if (mode === "turn") return null;
     const previous = delivered.get(key);
     if (previous && now - previous.at < 400) return null;
-    const { ready } = splitBufferedAssistantText(message.text);
+    let split = splitters.get(key);
+    if (split === undefined) {
+      split = makeIncrementalAssistantTextSplitter();
+      splitters.set(key, split);
+    }
+    const { ready } = split(message.text);
     if (!ready || ready === previous?.text) return null;
     delivered.set(key, { text: ready, at: now });
     if (event.type === "message.updated")
