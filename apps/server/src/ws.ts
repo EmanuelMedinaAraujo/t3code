@@ -782,10 +782,11 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
           afterSequence,
         })
         .pipe(
+          // The bounded event stream already projected each event for the wire.
           Stream.map((stored) => ({
             kind: "event" as const,
             sequence: stored.sequence,
-            event: projectDomainEventForWire(stored.event),
+            event: stored.event,
           })),
           coalesceThreadLiveStream,
           Stream.mapError(

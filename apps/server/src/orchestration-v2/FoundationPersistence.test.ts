@@ -56,6 +56,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import { projectTurnItemForWire } from "./WireProjection.ts";
 
 const isLiveStreamBufferError = Schema.is(LiveStreamBufferError);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -443,6 +444,64 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         )!;
         assert.equal(detail.type, "dynamic_tool");
         if (detail.type === "dynamic_tool") assert.deepEqual(detail.output, output);
+      }),
+    ),
+  );
+
+  it.effect("streams live turn items projected exactly once for the wire", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        const thread = makeThread(ThreadId.make("thread:single-wire-projection"), now);
+        // Multi-byte text past the detail limit: projecting the truncated
+        // prompt again would truncate it a second time.
+        const subagent: OrchestrationV2TurnItem = {
+          id: TurnItemId.make("subagent:single-wire-projection"),
+          type: "subagent",
+          threadId: thread.id,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          status: "running",
+          title: "Subagent",
+          subagentId: NodeId.make("node:single-wire-projection"),
+          origin: "provider_native",
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          childThreadId: null,
+          prompt: "漢".repeat(12_000),
+          result: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+        };
+        const [created] = yield* sink.write({
+          events: [threadCreatedEvent({ id: "event:single-wire-projection:created", thread, now })],
+        });
+        const pull = yield* Stream.toPull(
+          sink.stream({ threadId: thread.id, afterSequence: created!.sequence, bounded: true }),
+        );
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:single-wire-projection:live"),
+              type: "turn-item.updated",
+              threadId: thread.id,
+              occurredAt: now,
+              payload: subagent,
+            },
+          ],
+        });
+        const [live] = yield* pull;
+        assert.equal(live?.event.type, "turn-item.updated");
+        if (live?.event.type !== "turn-item.updated") return;
+        // ws relays this stream as-is, so this is what thread subscribers receive.
+        assert.deepEqual(live.event.payload, projectTurnItemForWire(subagent));
       }),
     ),
   );

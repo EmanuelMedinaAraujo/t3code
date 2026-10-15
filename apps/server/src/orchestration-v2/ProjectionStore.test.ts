@@ -863,6 +863,101 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("indexes streamed messages and turn items by the timestamps in their payloads", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread:streamed-timestamps");
+      const messageId = MessageId.make("message:streamed-timestamps");
+      const turnItemId = TurnItemId.make("turn-item:streamed-timestamps");
+      const createdAt = DateTime.makeUnsafe("2026-09-14T08:00:00.125Z");
+      const updatedAt = DateTime.makeUnsafe("2026-09-14T08:00:03.5Z");
+      const text = "Streamed reply.\n\n".repeat(200);
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:streamed-timestamps:message"),
+        type: "message.updated",
+        threadId,
+        occurredAt: updatedAt,
+        payload: {
+          id: messageId,
+          threadId,
+          runId: null,
+          nodeId: null,
+          createdBy: "agent",
+          creationSource: "provider",
+          role: "assistant",
+          text,
+          attachments: [],
+          streaming: true,
+          createdAt,
+          updatedAt,
+        },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:streamed-timestamps:turn-item"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: updatedAt,
+        payload: {
+          id: turnItemId,
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          status: "running",
+          title: null,
+          startedAt: createdAt,
+          completedAt: null,
+          updatedAt,
+          type: "assistant_message",
+          messageId,
+          text,
+          streaming: true,
+        },
+      });
+
+      const [message] = yield* sql<{
+        readonly created_at: string;
+        readonly updated_at: string;
+        readonly payload_created_at: string;
+        readonly payload_updated_at: string;
+      }>`
+        SELECT
+          created_at,
+          updated_at,
+          json_extract(payload_json, '$.createdAt') AS payload_created_at,
+          json_extract(payload_json, '$.updatedAt') AS payload_updated_at
+        FROM orchestration_v2_projection_messages
+        WHERE message_id = ${messageId}
+      `;
+      assert.deepEqual(message, {
+        created_at: DateTime.formatIso(createdAt),
+        updated_at: DateTime.formatIso(updatedAt),
+        payload_created_at: DateTime.formatIso(createdAt),
+        payload_updated_at: DateTime.formatIso(updatedAt),
+      });
+      const [turnItem] = yield* sql<{
+        readonly updated_at: string;
+        readonly payload_updated_at: string;
+      }>`
+        SELECT
+          updated_at,
+          json_extract(payload_json, '$.updatedAt') AS payload_updated_at
+        FROM orchestration_v2_projection_turn_items
+        WHERE turn_item_id = ${turnItemId}
+      `;
+      assert.deepEqual(turnItem, {
+        updated_at: DateTime.formatIso(updatedAt),
+        payload_updated_at: DateTime.formatIso(updatedAt),
+      });
+    }),
+  );
+
   it.effect("pages complete user turns through SQL regardless of tool count or payload size", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
