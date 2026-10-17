@@ -105,7 +105,7 @@ function boundedId(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length > MAX_ID_LENGTH || value.trim() === "") {
     return undefined;
   }
-  return Array.from(value).join("");
+  return value;
 }
 
 /** Keeps only IDs and failure metadata used by T3's grouped tool summaries. */

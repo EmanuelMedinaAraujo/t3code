@@ -73,9 +73,13 @@ function summarizeDynamicValue(value: unknown): unknown {
   // Preserve the first nonblank normalized line, but stop after the preview.
   // Splitting and normalizing every line can allocate far more than the input.
   const start = /\S/u.exec(serialized)?.index;
+  // Stop scanning after a bounded prefix so a huge run of whitespace between
+  // the first token and the rest of the string cannot drive an O(n) pass.
+  const scanLimit =
+    start === undefined ? serialized.length : Math.min(serialized.length, start + 4_096);
   let firstLine = start === undefined ? "Large tool output" : "";
   let pendingSpace = false;
-  for (let index = start ?? serialized.length; index < serialized.length; index += 1) {
+  for (let index = start ?? serialized.length; index < scanLimit; index += 1) {
     const character = serialized[index]!;
     if (character === "\n") break;
     if (/\s/u.test(character)) {
