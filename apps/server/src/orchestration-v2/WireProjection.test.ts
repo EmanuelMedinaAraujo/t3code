@@ -203,6 +203,21 @@ describe("orchestration V2 wire projection", () => {
     });
   });
 
+  it.each([
+    ["first" + " \t\r\u00a0".repeat(5_000) + "second", "first"],
+    ["a" + " ".repeat(4_094) + "b" + " ".repeat(20_000), "a b"],
+    ["a" + " ".repeat(4_095) + "b" + " ".repeat(20_000), "a"],
+    [" ".repeat(20_000) + "first" + " ".repeat(4_096) + "second", "first"],
+  ])("bounds the input preview scan after leading whitespace for case %#", (input, summary) => {
+    const item = { ...base, input };
+    const projected = projectTurnItemForWire(item);
+    expect(projected.type === "dynamic_tool" ? projected.input : null).toEqual({
+      summary,
+      truncated: true,
+    });
+    expect(item.input).toBe(input);
+  });
+
   it("uses encoded JSON bytes for strings near the dynamic-value limit", () => {
     const small = '"'.repeat(8_191);
     const large = '"'.repeat(8_192);
