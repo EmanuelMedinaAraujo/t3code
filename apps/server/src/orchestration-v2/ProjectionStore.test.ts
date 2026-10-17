@@ -691,6 +691,149 @@ it.effect("memory shell snapshots scope to one project", () =>
 );
 
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
+  it.effect("timeline pages batch item bodies and cap direct calls at 100", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const suffix = "timeline-page-body-batch";
+      const threadId = ThreadId.make(`thread:${suffix}`);
+      const runId = RunId.make(`run:${suffix}`);
+      const nodeId = NodeId.make(`node:${suffix}`);
+      const now = yield* DateTime.now;
+      yield* store.apply({
+        id: EventId.make(`event:${suffix}:thread-created`),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make(`project:${suffix}`),
+          title: "Timeline page body batch",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      yield* store.apply({
+        id: EventId.make(`event:${suffix}:run-created`),
+        type: "run.created",
+        threadId,
+        runId,
+        nodeId,
+        driver,
+        occurredAt: now,
+        payload: {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: null,
+          userMessageId: MessageId.make(`message:${suffix}:user`),
+          rootNodeId: nodeId,
+          activeAttemptId: null,
+          status: "completed",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      });
+      const itemCount = 101;
+      yield* Effect.forEach(
+        Array.from({ length: itemCount }, (_, index) => index),
+        (index) =>
+          store.apply({
+            id: EventId.make(`event:${suffix}:item-${index}`),
+            type: "turn-item.updated",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make(`turn-item:${suffix}:${index}`),
+              threadId,
+              runId,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: index + 1,
+              status: "completed",
+              title: null,
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "assistant_message",
+              messageId: MessageId.make(`message:${suffix}:${index}`),
+              text: `answer ${index}`,
+              streaming: false,
+            },
+          }),
+      );
+
+      const expected = (yield* store.getThreadProjection(threadId)).visibleTurnItems;
+      const { statements, tracer } = traceSqlStatements();
+      const page = yield* store
+        .getTimelinePage(threadId, { view: "activity", limit: 50 })
+        .pipe(Effect.withTracer(tracer));
+
+      assert.lengthOf(page.items, 50);
+      assert.deepEqual(page.items, expected.slice(0, 50));
+      assert.equal(page.totalItems, itemCount);
+      assert.isTrue(page.hasMore);
+      assert.lengthOf(
+        statements.filter((statement) =>
+          statement.includes("SELECT payload_json FROM orchestration_v2_projection_turn_items"),
+        ),
+        0,
+      );
+      assert.lengthOf(
+        statements.filter((statement) => statement.includes("JOIN json_each")),
+        1,
+      );
+
+      const oversizedPage = yield* store.getTimelinePage(threadId, {
+        view: "activity",
+        limit: 1000,
+      });
+      assert.deepEqual(oversizedPage.items, expected.slice(0, 100));
+      assert.equal(oversizedPage.totalItems, itemCount);
+      assert.isTrue(oversizedPage.hasMore);
+
+      statements.length = 0;
+      const emptyPage = yield* store
+        .getTimelinePage(threadId, { view: "activity", limit: 50, afterPosition: 100 })
+        .pipe(Effect.withTracer(tracer));
+      assert.isEmpty(emptyPage.items);
+      assert.isFalse(emptyPage.hasMore);
+      assert.isFalse(statements.some((statement) => statement.includes("JOIN json_each")));
+
+      const sql = yield* SqlClient.SqlClient;
+      const itemId = TurnItemId.make(`turn-item:${suffix}:100`);
+      yield* sql`UPDATE orchestration_v2_projection_turn_items SET payload_json = '{}'
+        WHERE thread_id = ${threadId} AND turn_item_id = ${itemId}`;
+      const failure = yield* store
+        .getTimelinePage(threadId, { view: "activity", limit: 1, itemId })
+        .pipe(Effect.flip);
+      assert.deepInclude(failure, { _tag: "ProjectionStoreReadError", threadId });
+    }),
+  );
   it.effect(
     "SQL recovery selects unfinished runless native subagents",
     () => runlessNativeSubagentNeedsRecovery,
@@ -5465,7 +5608,18 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         view: "activity",
         limit: expectedNestedIds.length + 1,
       });
-      assert.deepEqual(nestedForward.items, fullNested.visibleTurnItems);
+      const forwardItems = [...nestedForward.items];
+      let nestedPage = nestedForward;
+      while (nestedPage.hasMore) {
+        assert.lengthOf(nestedPage.items, 100);
+        nestedPage = yield* projectionStore.getTimelinePage(nestedThreadId, {
+          view: "activity",
+          afterPosition: nestedPage.items.at(-1)!.position,
+          limit: expectedNestedIds.length + 1,
+        });
+        forwardItems.push(...nestedPage.items);
+      }
+      assert.deepEqual(forwardItems, fullNested.visibleTurnItems);
       const messagePage = yield* projectionStore.getTimelinePage(nestedThreadId, {
         view: "messages",
         limit: 2,
