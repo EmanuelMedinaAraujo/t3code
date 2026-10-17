@@ -178,10 +178,13 @@ function upsertVisibleTurnItem(
   ) {
     return rows;
   }
-  // When an existing item's sort key (ordinal, id) is unchanged, its position in
-  // the sorted array stays the same — update in place without re-sorting or
-  // renumbering the full list. Streaming text/tool updates hit this path.
-  if (previous !== undefined && previous.item.ordinal === item.ordinal) {
+  if (
+    previous !== undefined &&
+    previous.visibility === next.visibility &&
+    previous.sourceThreadId === next.sourceThreadId &&
+    previous.item.ordinal === item.ordinal &&
+    rows.every((row, position) => row.position === position)
+  ) {
     const updated = [...rows];
     updated[index] = { ...previous, item };
     return updated;
