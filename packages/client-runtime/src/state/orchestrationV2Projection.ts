@@ -178,6 +178,14 @@ function upsertVisibleTurnItem(
   ) {
     return rows;
   }
+  // When an existing item's sort key (ordinal, id) is unchanged, its position in
+  // the sorted array stays the same — update in place without re-sorting or
+  // renumbering the full list. Streaming text/tool updates hit this path.
+  if (previous !== undefined && previous.item.ordinal === item.ordinal) {
+    const updated = [...rows];
+    updated[index] = { ...previous, item };
+    return updated;
+  }
   const updated = index === -1 ? [...rows] : [...rows.slice(0, index), ...rows.slice(index + 1)];
   const insertionIndex = updated.findIndex(
     (row) =>
