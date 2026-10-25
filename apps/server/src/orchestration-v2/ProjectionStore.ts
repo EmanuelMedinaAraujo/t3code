@@ -1182,6 +1182,10 @@ const encodeThreadPayload = Schema.encodeEffect(
 const encodeThreadUpdatedAt = Schema.encodeEffect(
   OrchestrationV2AppThreadJsonSchema.fields.updatedAt,
 );
+// Message and turn-item timestamps encode the same way inside their payloads.
+// Encoding them directly avoids parsing the payload JSON, which carries the
+// full streamed text, back just to read them.
+const encodePayloadTimestamp = Schema.encodeEffect(Schema.DateTimeUtcFromString);
 const encodeRunPayload = Schema.encodeEffect(Schema.fromJsonString(OrchestrationV2RunJsonSchema));
 const encodeRestartCancelledBackgroundWork = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationV2RunJsonSchema.fields.restartCancelledBackgroundWork),
@@ -2546,7 +2550,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }
             case "message.updated": {
               const payloadJson = yield* encodeMessagePayload(event.payload);
-              const payload = parseEncodedPayload(payloadJson);
+              const createdAt = yield* encodePayloadTimestamp(event.payload.createdAt);
+              const updatedAt = yield* encodePayloadTimestamp(event.payload.updatedAt);
               yield* sql`
               INSERT INTO orchestration_v2_projection_messages (
                 message_id,
@@ -2566,8 +2571,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${event.payload.nodeId},
                 ${event.payload.role},
                 ${booleanInt(event.payload.streaming)},
-                ${stringField(payload, "createdAt")},
-                ${stringField(payload, "updatedAt")},
+                ${createdAt},
+                ${updatedAt},
                 ${payloadJson}
               )
               ON CONFLICT(message_id)
@@ -2617,7 +2622,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }
             case "turn-item.updated": {
               const payloadJson = yield* encodeTurnItemPayload(event.payload);
-              const payload = parseEncodedPayload(payloadJson);
+              const updatedAt = yield* encodePayloadTimestamp(event.payload.updatedAt);
               yield* sql`
               INSERT INTO orchestration_v2_projection_turn_items (
                 turn_item_id,
@@ -2644,7 +2649,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${event.payload.ordinal},
                 ${event.payload.type},
                 ${event.payload.status},
-                ${stringField(payload, "updatedAt")},
+                ${updatedAt},
                 ${payloadJson}
               )
               ON CONFLICT(turn_item_id)
